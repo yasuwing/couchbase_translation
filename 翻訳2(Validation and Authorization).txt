@@ -1,0 +1,120 @@
+http://developer.couchbase.com/mobile/develop/guides/sync-gateway/sync-function-api-guide/validation/index.html
+
+検証と認証
+^^^^^^^^^^^
+
+sync function APIはドキュメント生成、更新や削除の検証に使用出来る様々なメソッドを提供しています。エラー条件に対して、単純にビルトインのJavaScriptのthrow関数を呼ぶことが出来ます。requireUser関数, requireRole関数, または requireAccess関数を呼び出すことで、ユーザーアクセス権を強いることも出来ます。
+
+破棄されたドキュメントはどうなるのでしょうか。まず、それらはSync Gatewayのデータベースには保存されません。そのためアクセス変更は行われません。その代り、エラーコード（たいてい 403 Forbidden）がクライアントに戻されます。しかし、クライアントには無効なドキュメントがまだローカルデータベースに残っています。それを修正するかどうかはクライアント次第です。ただし我々がお勧めするのは、そもそも無効のドキュメントを生成しないということです。出来る限り、クライアントのアプリロジックと検証機能によって、無効なドキュメントがローカルに生成されるのを防ぐべきです。サーバー側sync functionの検証処理は、悪意のあるアクセスに対する 二重安全装置と保護装置とみなされなければなりません。
+
+◯注意
+チャネルはユーザーがドキュメントを見られるかどうかを制御するものであり、ユーザーが書き込みを出来るかを制御するものではないということを理解することが非常に重要です。★There are legitimate use cases for being able to create documents that you can't read afterwards (such as drop-boxes) so the Sync Gateway doesn't prevent this.★（すみません、ここがうまく訳出できません！どなたかヘルプお願い致します！） デフォルトでは、どんなユーザーでもどんなドキュメントでも生成、更新、削除を行うことが出来ます。ユーザーに変更権限が与えられていることをチェックするかどうかは、あなたのsync function次第です。
+
+
+ドキュメントを検証する際、無効な状態変更をチェックするために、しばしば新しいリビジョンと古いリビジョンを比較する必要があります。例えば、あるプロパティはドキュメント生成後は変更不可かもしれません。または特定のユーザーによってのみ変更可能かもしれません。あるいは特定の方法でのみ変更を認められているかもしれません。現在のドキュメントの内容がsync functionにoldDocパラメータとして与えられるのはそのためです。
+
+◯注意
+docパラメータは全てのプロパティが信頼出来ないと考えるべきです。なぜなら、これは結局あなたが今現在検証しているオブジェクトだからです。これは明白のように聞こえますが、requireUser(oldDoc.owners)の代りにrequireUser(doc.owners)を呼んでしまうようなミスはしやすいものです。あるドキュメントのプロパティを用いて別のドキュメントを検証する時は、oldDocのプロパティを見なければなりません。
+
+検証チェックはしばしば削除を特別扱いする必要があります。なぜなら、削除はただ"_deleted":trueプロパティが付いたリビジョンで、たいていそれ以外のプロパティを含まないからです。この欠けたプロパティのために、様々なタイプの検証が削除では機能しません。例えば、必須プロパティのチェックやプロパティ値が変更しないことのチェックなど。もしdoc._deletedがtrueだったらそのようなチェックをスキップする必要があるでしょう。この記事（リンク）の終わりに、数々のタイプの検証方法と認証方法を例示する、完全な見本となるsync functionがあります。
+
+
+throw関数
+----------
+もっとも基本的なレベルでは、sync functionはforbidden:プロパティを含むエラーオブジェクトを引数としてthrow関数を呼び出すことで、ドキュメントが永続化されたり他のユーザーと同期を取ることを妨げます。必要な制約をチェックし、それらが満たされていない場合に例外をスローすることで、ドキュメント構成の有効性を強要出来ます。
+
+以下に、全ての書き込みを禁止するsync functionの例を示します。
+
+function (doc) {
+   throw ({forbidden : "read only!"})
+}
+
+ドキュメントの更新は forbidden:プロパティの値をHTTPステータスメッセージとして、HTTP 403 "Forbidden" error コードでもって、破棄されることになるでしょう。これが更新を破棄する好ましいやり方です。
+
+他のどのような例外も（配列の範囲例外など、JavaScript runtimeにより行われる暗黙的例外も含む）ドキュメントの更新を破棄することになりますが、その場合はHTTP 500 "Internal Error"ステータスが返されます。
+
+
+requireUser (username)
+---------------------------------
+requireUser関数 は、特定のユーザー（達）によってなされない限りドキュメントの更新を破棄することによって、認証を行います。
+以下に例を示します。
+
+// ユーザー名が"snej"でなかったらエラーをスローする
+requireUser("snej");
+                            
+// ユーザー名がリストになかったらエラーをスローする
+requireUser(["snej", "jchris", "tleyden"]);
+
+関数が例外をスローすることで破棄のシグナルを送り、sync functionの残りの部分は実行されないようになります。
+
+requireRole (rolename)
+---------------------------------
+requireRole関数は、ユーザーが特定のロール（複数の場合もある）を有していない場合にドキュメント更新を破棄することで、認証を行います。
+以下に例を示します。
+
+// ユーザーが"admin" 権限を有していなかった場合、エラーをスローする:
+requireRole("admin");
+                            
+// ユーザーがリスト内の一つ以上の権限を有していない場合、エラーをスローする:
+requireRole(["admin", "old-timer"]);   
+
+引数は、ひとつのロール名かもしれないし、もしくはロール名の配列かもしれません。後者の場合、変更を行っているユーザーはリスト内の一つ以上のロールを有していなくてはなりません。
+関数が例外をスローすることで破棄のシグナルを送り、sync functionの残りの部分は実行されないようになります。
+
+requireAccess (channels)
+-----------------------------------
+requireAccess関数は、ユーザーが特定のチャネルのうち少なくとも一つへのアクセスを有していない場合にドキュメント更新を破棄することで、認証を行います。
+以下に例を示します。
+
+// ユーザーが"events" チャネルへのアクセスを有しない限り例外をスローします：
+requireAccess("events");
+                            
+// ユーザーが直前のリビジョンの"channels"プロパティに含まれる
+// チャネルのひとつへのアクセスを有しない限り例外をスローします：
+if (oldDoc) {
+    requireAccess(oldDoc.channels);
+}
+
+関数が例外をスローすることで破棄のシグナルを送り、sync functionの残りの部分は実行されないようになります。
+
+例
+----
+以下は新ドキュメントと更新されたドキュメントを共に正しく検証・認証する、完全で便利なsync functionです。
+必要条件：
+・editorロールを有するユーザーのみがドキュメントの新規作成や削除を行うことが出来ます
+・全てのドキュメントには、ドキュメントを生成したユーザー名を含む、変更不可のcreatorプロパティがあります
+・ドキュメントのwritersプロパティ（必須、空は不可）に指定されたユーザーのみがドキュメントに対する変更を行うことが出来ます（削除を含みます）
+・全てのドキュメントには、titleとchannelの各プロパティがなければなりません
+
+function (doc, oldDoc) {
+    if (doc._deleted) {
+        // Only editors with write access can delete documents:
+        requireRole("role:editor");
+        requireUser(oldDoc.writers);
+        // Skip other validation because a deletion has no other properties:
+        return;
+    }
+    // Required properties:
+    if (!doc.title || !doc.creator || !doc.channels || !doc.writers) {
+        throw(forbidden: "Missing required properties");
+    } else if (doc.writers.length == 0) {
+        throw(forbidden: "No writers");
+    }
+    if (oldDoc == null) {
+        // Only editors can create documents:
+        requireRole("role:editor");
+        // The 'creator' property must match the user creating the document:
+        requireUser(doc.creator)
+    } else {
+        // Only users in the existing doc's writers list can change a document:
+        requireUser(oldDoc.writers);
+        // The "creator" property is immutable:
+        if (doc.creator != oldDoc.creator) {
+            throw(forbidden: "Can't change creator");
+        }
+    }
+    // Finally, assign the document to the channels in the list:
+    channel(doc.channels);
+}
+
+
